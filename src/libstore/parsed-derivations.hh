@@ -38,4 +38,5 @@ public:
     bool substitutesAllowed() const;
 };
 
+std::optional<std::string> generateStructuredAttrsShell(const ParsedDerivation & parsedDrv, BasicDerivation & drv);
 }
