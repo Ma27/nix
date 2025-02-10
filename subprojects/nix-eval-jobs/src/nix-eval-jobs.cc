@@ -1,5 +1,7 @@
 #include <lix/config.h> // IWYU pragma: keep
 
+#include <lix/libstore/derivations.hh>
+#include <lix/libstore/local-fs-store.hh>
 #include <lix/libexpr/eval-settings.hh>
 #include <lix/libmain/shared.hh>
 #include <lix/libutil/async.hh>
@@ -152,6 +154,7 @@ struct Thread {
 struct State {
     std::set<json> todo = json::array({json::array()});
     std::set<json> active;
+    std::map<std::string, json> jobs;
     std::exception_ptr exc;
 };
 
@@ -313,7 +316,11 @@ void collector(MyArgs &myArgs, Sync<State> &state_,
                 }
             } else {
                 auto state(state_.lock());
-                std::cout << respString << "\n" << std::flush;
+                state->jobs.insert_or_assign(response["attr"], response);
+                auto named = response.find("namedConstituents");
+                if (named == response.end() || named->empty()) {
+                    std::cout << respString << "\n" << std::flush;
+                }
             }
 
             proc_ = std::move(proc);
@@ -392,5 +399,81 @@ int main(int argc, char **argv) {
 
         if (state->exc)
             std::rethrow_exception(state->exc);
+
+        if (myArgs.constituents) {
+            auto store = myArgs.evalStoreUrl
+                 ? openStore(*myArgs.evalStoreUrl)
+                 : openStore();
+            for (auto & [attr, job_json] : state->jobs) {
+                auto namedConstituents = job_json.find("namedConstituents");
+                if (namedConstituents != job_json.end() && !namedConstituents->empty()) {
+                    bool broken = false;
+                    auto drvPathAggregate = store->parseStorePath((std::string) job_json["drvPath"]);
+                    auto drvAggregate = store->readDerivation(drvPathAggregate);
+                    if (!job_json.contains("constituents")) {
+                        job_json["constituents"] = json::array();
+                    }
+                    std::vector<std::string> errors;
+                    for (auto child : *namedConstituents) {
+                        auto childJob = state->jobs.find(child);
+                        if (childJob == state->jobs.end()) {
+                            broken = true;
+                            errors.push_back(fmt("%s: does not exist", child));
+                        } else if (childJob->second.find("error") != childJob->second.end()) {
+                            broken = true;
+                            errors.push_back(fmt("%s: %s", child, childJob->second["error"]));
+                        } else {
+                            auto drvPathChild = store->parseStorePath((std::string) childJob->second["drvPath"]);
+                            auto drvChild = store->readDerivation(drvPathChild);
+                            job_json["constituents"].push_back(store->printStorePath(drvPathChild));
+                            drvAggregate.inputDrvs.map[drvPathChild].value = {drvChild.outputs.begin()->first};
+                        }
+                    }
+
+                    if (broken) {
+                        json out;
+                        out["attr"] = job_json["attr"];
+                        out["error"] = concatStringsSep("\n", errors);
+                        out["constituents"] = json::array();
+                        std::cout << out.dump() << "\n" << std::flush;
+                    } else {
+                        std::string drvName(drvPathAggregate.name());
+                        assert(drvName.ends_with(nix::drvExtension));
+                        drvName.resize(drvName.size() - nix::drvExtension.size());
+
+                        auto hashModulo = nix::hashDerivationModulo(*store, drvAggregate, true);
+                        if (hashModulo.kind != nix::DrvHash::Kind::Regular) continue;
+
+                        auto h = hashModulo.hashes.find("out");
+                        if (h == hashModulo.hashes.end()) continue;
+                        auto outPath = store->makeOutputPath("out", h->second, drvName);
+                        drvAggregate.env["out"] = store->printStorePath(outPath);
+                        drvAggregate.outputs.insert_or_assign("out", nix::DerivationOutput::InputAddressed { .path = outPath });
+                        auto newDrvPath = store->printStorePath(nix::writeDerivation(*store, drvAggregate));
+
+                        if (myArgs.gcRootsDir != "") {
+                            nix::Path root =
+                                myArgs.gcRootsDir + "/" +
+                                std::string(nix::baseNameOf(newDrvPath));
+                            if (!nix::pathExists(root)) {
+                                auto localStore =
+                                    store
+                                        .dynamic_pointer_cast<nix::LocalFSStore>();
+                                auto storePath =
+                                    localStore->parseStorePath(newDrvPath);
+                                localStore->addPermRoot(storePath, root);
+                            }
+                        }
+
+                        debug("rewrote aggregate derivation %s -> %s", store->printStorePath(drvPathAggregate), newDrvPath);
+
+                        job_json["drvPath"] = newDrvPath;
+                        job_json["outputs"]["out"] = store->printStorePath(outPath);
+                        job_json.erase("namedConstituents");
+                        std::cout << job_json.dump() << "\n" << std::flush;
+                    }
+                }
+            }
+        }
     });
 }

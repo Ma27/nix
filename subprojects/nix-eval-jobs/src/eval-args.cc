@@ -63,6 +63,10 @@ MyArgs::MyArgs(nix::AsyncIoRoot & aio) : MixCommonArgs("nix-eval-jobs"), aio_(ai
              .description = "include derivation meta field in output",
              .handler = {&meta, true}});
 
+    addFlag({.longName = "constituents",
+             .description = "whether to evaluate constituents for Hydra's aggregate feature",
+             .handler = {&constituents, true}});
+
     addFlag({.longName = "check-cache-status",
              .description =
                  "Check if the derivations are present locally or in "
