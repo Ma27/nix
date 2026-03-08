@@ -101,7 +101,8 @@
         "aarch64-darwin"
       ];
       nonDarwinSystems = linuxSystems;
-      systems = linuxSystems ++ darwinSystems;
+      #systems = linuxSystems ++ darwinSystems;
+      systems = [ "x86_64-linux" ];
 
       # If you add something here, please update the list in doc/manual/src/contributing/hacking.md.
       # Thanks~
@@ -272,6 +273,43 @@
       overlays.default = overlayFor (p: p.clangStdenv);
 
       hydraJobs = {
+        # Aggregate job that is finished in Hydra _after_ all constituent jobs (here: grouped by system)
+        # succeed.
+        # This is used to run CD scripts once all builds are finished on Hydra.
+        release = forAllSystems (
+          system:
+          let
+            pkgs = nixpkgsFor.${system}.native;
+          in
+          pkgs.runCommand "release"
+            {
+              _hydraAggregate = true;
+              constituents = lib.filter (x: x != null) (
+                lib.mapAttrsToListRecursiveCond
+                  (_: val: !(lib.isDerivation val || builtins.any (system': val ? ${system'}) systems))
+                  (
+                    path: drv:
+                    if drv ? ${system} then
+                      lib.concatStringsSep "." (path ++ [ system ])
+                    else if drv.system or null == system then
+                      lib.concatStringsSep "." path
+                    else
+                      null
+                  )
+                  (
+                    removeAttrs self.hydraJobs [
+                      "devShells"
+                      "release"
+                      "rl-next"
+                    ]
+                  )
+              );
+            }
+            ''
+              touch $out
+            ''
+        );
+
         # Binary package for various platforms.
         build = forAllSystems (system: self.packages.${system}.nix);
 
