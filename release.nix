@@ -42,6 +42,7 @@ let
         "nix2container"
         "nixpkgs-regression"
         "nix_2_18"
+        "flakey-profile"
       ]
       // {
         inherit lib nixpkgs lixSrc;
